@@ -202,6 +202,8 @@ func userHandler(w http.ResponseWriter, r *http.Request, s *serverContext) {
 	elapsed := time.Since(begin)
 	e := fmt.Sprintf(" (elapsed=%v) ", elapsed)
 
+	log.Printf("%s: ticket=%s code=%d err=%v"+e, me, ticket, code, err)
+
 	if err != nil {
 		http.Error(w, me+": "+strconv.Itoa(code)+" - "+http.StatusText(code)+": "+err.Error()+e, code)
 		return
