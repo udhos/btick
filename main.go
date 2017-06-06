@@ -1,12 +1,13 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
+	_ "github.com/go-sql-driver/mysql"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	//"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,8 @@ type serverContext struct {
 	cachemutex sync.RWMutex
 	db         map[string]string
 	cache      map[string]string
+	mdb        *sql.DB
+	realDB     bool
 }
 
 func (s *serverContext) getTicket(user string) (string, int, error) {
@@ -96,6 +99,10 @@ func (s *serverContext) dbRead(user string) (string, error) {
 	defer s.dbmutex.RUnlock()
 	s.dbmutex.RLock()
 
+	if s.realDB {
+		return "", fmt.Errorf("mysql dbread not found")
+	}
+
 	t, found := s.db[user]
 	if found {
 		return t, nil
@@ -107,6 +114,10 @@ func (s *serverContext) dbRead(user string) (string, error) {
 func (s *serverContext) dbWrite(user, ticket string) {
 	defer s.dbmutex.Unlock()
 	s.dbmutex.Lock()
+
+	if s.realDB {
+		return
+	}
 
 	s.db[user] = ticket
 }
@@ -137,6 +148,34 @@ func main() {
 	s := &serverContext{
 		db:    map[string]string{},
 		cache: map[string]string{},
+	}
+
+	realdb := os.Getenv("DB_REAL")
+	s.realDB = realdb != ""
+
+	if s.realDB {
+		user := os.Getenv("DB_USER")
+		pass := os.Getenv("DB_PASS")
+		host := os.Getenv("DB_HOST")
+		dbname := os.Getenv("DB_NAME")
+
+		msg := fmt.Sprintf("DB_REAL='%s' DB_USER='%s' DB_PASS='%s' DB_HOST='%s' DB_NAME='%s'", realdb, user, pass, host, dbname)
+
+		if user == "" || pass == "" || host == "" || dbname == "" {
+			log.Fatalf("missing parameter: %s", msg)
+		}
+
+		log.Print(msg)
+
+		// username:password@protocol(address)/dbname?param=value
+		dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s", user, pass, host, dbname)
+
+		mdb, errDB := sql.Open("mysql", dsn)
+		if errDB != nil {
+			log.Fatalf("sql open(%s): %v", dsn, errDB)
+		}
+
+		s.mdb = mdb
 	}
 
 	http.HandleFunc(rootPath, func(w http.ResponseWriter, r *http.Request) { contextHandle(w, r, s, rootHandler) })

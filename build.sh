@@ -4,6 +4,8 @@
 
 echo GOPATH=$GOPATH
 
+go get github.com/go-sql-driver/mysql
+
 pkg=github.com/udhos/btick
 
 gofmt -s -w main.go
