@@ -7,14 +7,140 @@ import (
 	"net/http"
 	"os"
 	//"runtime"
-	//"time"
 	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
 )
+
+const (
+	rootPath = "/"
+	userPath = "/user/"
+)
+
+type serverContext struct {
+	tickets    int64
+	dbreads    int32
+	computes   int32
+	dbmutex    sync.RWMutex
+	cachemutex sync.RWMutex
+	db         map[string]string
+	cache      map[string]string
+}
+
+func (s *serverContext) getTicket(user string) (string, int, error) {
+	if user == "" || user == "errorc" {
+		return "", http.StatusNotFound, fmt.Errorf("getTicket(errorc)")
+	}
+	if user == "errors" {
+		return "", http.StatusInternalServerError, fmt.Errorf("getTicket(errors)")
+	}
+
+	// try cache
+	t1, errCache := s.cacheRead(user)
+	if errCache == nil {
+		return t1, http.StatusOK, nil
+	}
+
+	// try DB
+	t2, errDB := s.dbRead(user)
+	if errDB == nil {
+		s.cacheWrite(user, t2)
+		return t2, http.StatusOK, nil
+	}
+
+	// try compute
+	t3, errCompute := s.compute(user)
+	if errCompute == nil {
+		s.dbWrite(user, t3)
+		return t3, http.StatusOK, nil
+	}
+
+	return "", http.StatusInternalServerError, fmt.Errorf("getTicket() failure: %v", errCompute)
+}
+
+func (s *serverContext) cacheRead(user string) (string, error) {
+	defer s.cachemutex.RUnlock()
+	s.cachemutex.RLock()
+
+	t, found := s.cache[user]
+	if found {
+		return t, nil
+	}
+
+	return "", fmt.Errorf("cacheread not found")
+}
+
+func (s *serverContext) cacheWrite(user, ticket string) {
+	defer s.cachemutex.Unlock()
+	s.cachemutex.Lock()
+
+	s.cache[user] = ticket
+}
+
+func (s *serverContext) dbRead(user string) (string, error) {
+	defer atomic.AddInt32(&s.dbreads, -1)
+	r := atomic.AddInt32(&s.dbreads, 1)
+	delay := time.Duration(r) * 200 * time.Millisecond
+
+	log.Printf("dbreads=%d delay=%v", r, delay)
+
+	timeout := 2000 * time.Millisecond
+	if delay > timeout {
+		time.Sleep(timeout)
+		return "", fmt.Errorf("dbread timeout: %v", timeout)
+	}
+
+	time.Sleep(delay)
+
+	defer s.dbmutex.RUnlock()
+	s.dbmutex.RLock()
+
+	t, found := s.db[user]
+	if found {
+		return t, nil
+	}
+
+	return "", fmt.Errorf("dbread not found")
+}
+
+func (s *serverContext) dbWrite(user, ticket string) {
+	defer s.dbmutex.Unlock()
+	s.dbmutex.Lock()
+
+	s.db[user] = ticket
+}
+
+func (s *serverContext) compute(user string) (string, error) {
+
+	defer atomic.AddInt32(&s.computes, -1)
+	c := atomic.AddInt32(&s.computes, 1)
+	delay := time.Duration(c) * 1000 * time.Millisecond
+
+	log.Printf("computes=%d delay=%v", c, delay)
+
+	timeout := 10000 * time.Millisecond
+	if delay > timeout {
+		time.Sleep(timeout)
+		return "", fmt.Errorf("compute timeout: %v", timeout)
+	}
+
+	time.Sleep(delay)
+
+	n := atomic.AddInt64(&s.tickets, 1)
+	t := strconv.FormatInt(n, 16)
+	return t, nil
+}
 
 func main() {
 
-	http.HandleFunc("/", rootHandler)      // root handler
-	http.HandleFunc("/user/", userHandler) // user handler
+	s := &serverContext{
+		db:    map[string]string{},
+		cache: map[string]string{},
+	}
+
+	http.HandleFunc(rootPath, func(w http.ResponseWriter, r *http.Request) { contextHandle(w, r, s, rootHandler) })
+	http.HandleFunc(userPath, func(w http.ResponseWriter, r *http.Request) { contextHandle(w, r, s, userHandler) })
 
 	//registerStatic("/www/", currDir)
 
@@ -47,10 +173,14 @@ func (handler staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 */
 
-func rootHandler(w http.ResponseWriter, r *http.Request) {
+func contextHandle(w http.ResponseWriter, r *http.Request, s *serverContext, handler func(http.ResponseWriter, *http.Request, *serverContext)) {
+	handler(w, r, s)
+}
+
+func rootHandler(w http.ResponseWriter, r *http.Request, s *serverContext) {
 	me := "rootHandler"
 	msg := fmt.Sprintf("%s: url=%s from=%s", me, r.URL.Path, r.RemoteAddr)
-	log.Printf(msg)
+	log.Print(msg)
 
 	code := http.StatusNotFound
 	http.Error(w, strconv.Itoa(code)+" - "+http.StatusText(code)+" - "+msg, code)
@@ -58,32 +188,24 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	//io.WriteString(w, msg)
 }
 
-func userHandler(w http.ResponseWriter, r *http.Request) {
+func userHandler(w http.ResponseWriter, r *http.Request, s *serverContext) {
 	me := "userHandler"
 	msg := fmt.Sprintf("%s: url=%s from=%s", me, r.URL.Path, r.RemoteAddr)
-	log.Printf(msg)
+	log.Print(msg)
 
-	user := r.URL.Path[len("/user/"):]
+	user := r.URL.Path[len(userPath):]
 
-	if user == "" || user == "errorc" {
-		code := http.StatusNotFound
-		http.Error(w, me+": "+strconv.Itoa(code)+" - "+http.StatusText(code), code)
-		return
-	}
+	begin := time.Now()
 
-	ticket, err := getTicket(user)
+	ticket, code, err := s.getTicket(user)
+
+	elapsed := time.Since(begin)
+	e := fmt.Sprintf(" (elapsed=%v) ", elapsed)
+
 	if err != nil {
-		code := http.StatusInternalServerError
-		http.Error(w, me+": "+strconv.Itoa(code)+" - "+http.StatusText(code)+": "+err.Error(), code)
+		http.Error(w, me+": "+strconv.Itoa(code)+" - "+http.StatusText(code)+": "+err.Error()+e, code)
 		return
 	}
 
-	io.WriteString(w, msg+" ticket="+ticket)
-}
-
-func getTicket(user string) (string, error) {
-	if user == "errors" {
-		return "", fmt.Errorf("getTicket(errors)")
-	}
-	return user, nil
+	io.WriteString(w, msg+" ticket="+ticket+e)
 }
