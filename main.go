@@ -52,6 +52,8 @@ func (s *serverContext) getTicket(user string) (string, int, error) {
 		return t2, http.StatusOK, nil
 	}
 
+	log.Printf("dbread failure: %v", errDB)
+
 	// try compute
 	t3, errCompute := s.compute(user)
 	if errCompute == nil {
@@ -100,7 +102,22 @@ func (s *serverContext) dbRead(user string) (string, error) {
 	s.dbmutex.RLock()
 
 	if s.realDB {
-		return "", fmt.Errorf("mysql dbread not found")
+
+		rows, errQuery := s.mdb.Query("select ticket from ticket_table where user = ?", user)
+		if errQuery != nil {
+			return "", fmt.Errorf("mysql dbread query: %v", errQuery)
+		}
+
+		defer rows.Close()
+
+		rows.Next()
+		var t string
+		if errScan := rows.Scan(&t); errScan != nil {
+			return "", fmt.Errorf("mysql dbread not found: %v", errScan)
+		}
+
+		log.Printf("mysql dbread: user=%s ticket=%s", user, t)
+		return t, nil
 	}
 
 	t, found := s.db[user]
@@ -116,6 +133,17 @@ func (s *serverContext) dbWrite(user, ticket string) {
 	s.dbmutex.Lock()
 
 	if s.realDB {
+
+		rows, errQuery := s.mdb.Query("insert into ticket_table (user, ticket) values(?,?) on duplicate key update ticket=?", user, ticket, ticket)
+		if errQuery != nil {
+			log.Printf("mysql dbwrite query: %v", errQuery)
+			return
+		}
+
+		defer rows.Close()
+
+		log.Printf("mysql dbwrite: user=%s ticket=%s", user, ticket)
+
 		return
 	}
 
@@ -172,6 +200,7 @@ func main() {
 
 		mdb, errDB := sql.Open("mysql", dsn)
 		if errDB != nil {
+			mdb.Close()
 			log.Fatalf("sql open(%s): %v", dsn, errDB)
 		}
 
