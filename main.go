@@ -90,7 +90,15 @@ func (s *serverContext) openCache() {
 		log.Fatalf("aws session: %s", err)
 	}
 
-	s.svcDynamo = dynamodb.New(sess)
+	region := os.Getenv("AWS_REGION")
+	log.Printf("AWS_REGION=%s", region)
+	if region == "" {
+		region = "us-east-1"
+		log.Printf("missing AWS_REGION, setting region to: %s", region)
+	}
+	config := aws.NewConfig().WithRegion(region)
+	s.svcDynamo = dynamodb.New(sess, config)
+	log.Printf("dynamodb cache: region=%s", *config.Region)
 }
 
 func (s *serverContext) getTicket(user string) (string, int, error) {
@@ -158,6 +166,8 @@ func (s *serverContext) cacheRead(user string) (string, error) {
 		if errUnmarshal != nil {
 			return "", fmt.Errorf("dynamoDB cacheread: unmarshal: %v", errUnmarshal)
 		}
+
+		log.Printf("dynamodb cacheread: user=%s ticket=%s", user, item.Ticket)
 
 		return item.Ticket, nil
 
