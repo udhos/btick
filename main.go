@@ -27,8 +27,77 @@ type serverContext struct {
 	cachemutex sync.RWMutex
 	db         map[string]string
 	cache      map[string]string
-	mdb        *sql.DB
+	mdb        *sql.DB // MySQL
+	dynamo     int     // dynamoDB cache
 	realDB     bool
+	realCache  bool
+}
+
+func (s *serverContext) openDB() {
+
+	dbreal := os.Getenv("DB_REAL")
+	s.realDB = dbreal != ""
+
+	if !s.realDB {
+		return
+	}
+
+	user := os.Getenv("DB_USER")
+	pass := os.Getenv("DB_PASS")
+	host := os.Getenv("DB_HOST")
+	dbname := os.Getenv("DB_NAME")
+
+	msg := fmt.Sprintf("DB_REAL='%s' DB_USER='%s' DB_PASS='%s' DB_HOST='%s' DB_NAME='%s'", dbreal, user, pass, host, dbname)
+
+	if user == "" || pass == "" || host == "" || dbname == "" {
+		log.Fatalf("missing parameter: %s", msg)
+	}
+
+	log.Print(msg)
+
+	// username:password@protocol(address)/dbname?param=value
+	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s", user, pass, host, dbname)
+
+	mdb, errDB := sql.Open("mysql", dsn)
+	if errDB != nil {
+		mdb.Close()
+		log.Fatalf("sql open(%s): %v", dsn, errDB)
+	}
+
+	s.mdb = mdb
+}
+
+func (s *serverContext) openCache() {
+
+	cachereal := os.Getenv("CACHE_REAL")
+	s.realCache = cachereal != ""
+
+	if !s.realCache {
+		return
+	}
+
+	table := os.Getenv("CACHE_TABLE")
+
+	msg := fmt.Sprintf("CACHE_REAL='%s' CACHE_TABLE='%s'", cachereal, table)
+
+	if table == "" {
+		log.Fatalf("missing parameter: %s", msg)
+	}
+
+	log.Print(msg)
+
+	/*
+		dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s", user, pass, host, dbname)
+
+		mdb, errDB := sql.Open("mysql", dsn)
+		if errDB != nil {
+			mdb.Close()
+			log.Fatalf("sql open(%s): %v", dsn, errDB)
+		}
+
+		s.mdb = mdb
+	*/
+	s.dynamo = 1
 }
 
 func (s *serverContext) getTicket(user string) (string, int, error) {
@@ -44,6 +113,8 @@ func (s *serverContext) getTicket(user string) (string, int, error) {
 	if errCache == nil {
 		return t1, http.StatusOK, nil
 	}
+
+	log.Printf("cacheread failure: %v", errCache)
 
 	// try DB
 	t2, errDB := s.dbRead(user)
@@ -68,17 +139,26 @@ func (s *serverContext) cacheRead(user string) (string, error) {
 	defer s.cachemutex.RUnlock()
 	s.cachemutex.RLock()
 
+	if s.realCache {
+		return "", fmt.Errorf("dynamoDB cacheread: FIXME WRITEME")
+	}
+
 	t, found := s.cache[user]
 	if found {
 		return t, nil
 	}
 
-	return "", fmt.Errorf("cacheread not found")
+	return "", fmt.Errorf("cacheread: not found")
 }
 
 func (s *serverContext) cacheWrite(user, ticket string) {
 	defer s.cachemutex.Unlock()
 	s.cachemutex.Lock()
+
+	if s.realCache {
+		log.Printf("dynamoDB cachewrite: FIXME WRITEME")
+		return
+	}
 
 	s.cache[user] = ticket
 }
@@ -178,34 +258,8 @@ func main() {
 		cache: map[string]string{},
 	}
 
-	realdb := os.Getenv("DB_REAL")
-	s.realDB = realdb != ""
-
-	if s.realDB {
-		user := os.Getenv("DB_USER")
-		pass := os.Getenv("DB_PASS")
-		host := os.Getenv("DB_HOST")
-		dbname := os.Getenv("DB_NAME")
-
-		msg := fmt.Sprintf("DB_REAL='%s' DB_USER='%s' DB_PASS='%s' DB_HOST='%s' DB_NAME='%s'", realdb, user, pass, host, dbname)
-
-		if user == "" || pass == "" || host == "" || dbname == "" {
-			log.Fatalf("missing parameter: %s", msg)
-		}
-
-		log.Print(msg)
-
-		// username:password@protocol(address)/dbname?param=value
-		dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s", user, pass, host, dbname)
-
-		mdb, errDB := sql.Open("mysql", dsn)
-		if errDB != nil {
-			mdb.Close()
-			log.Fatalf("sql open(%s): %v", dsn, errDB)
-		}
-
-		s.mdb = mdb
-	}
+	s.openDB()
+	s.openCache()
 
 	http.HandleFunc(rootPath, func(w http.ResponseWriter, r *http.Request) { contextHandle(w, r, s, rootHandler) })
 	http.HandleFunc(userPath, func(w http.ResponseWriter, r *http.Request) { contextHandle(w, r, s, userHandler) })
