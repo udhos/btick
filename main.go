@@ -123,8 +123,13 @@ func (s *serverContext) openCache() {
 	case cacheMemcached:
 		hosts := os.Getenv("CACHE_MEMCACHED_HOSTS")
 		memcachedHosts := strings.Split(hosts, ",")
-		if len(memcachedHosts) < 1 {
-			log.Fatalf("bad CACHE_MEMCACHED_HOSTS='%s'", hosts)
+		if n := len(memcachedHosts); n < 1 {
+			log.Fatalf("bad count=%d for CACHE_MEMCACHED_HOSTS='%s'", n, hosts)
+		}
+		for _, h := range memcachedHosts {
+			if h == "" {
+				log.Fatalf("empty host='%s' for CACHE_MEMCACHED_HOSTS='%s'", h, hosts)
+			}
 		}
 		s.memcache = memcache.New(memcachedHosts...)
 		log.Printf("open cache: memcached")
@@ -226,11 +231,28 @@ func dynamoPut(svc *dynamodb.DynamoDB, user, ticket string) {
 }
 
 func memcachedGet(mc *memcache.Client, user string) (string, error) {
-	return "", fmt.Errorf("memcachedGet: FIXME WRITEME")
+
+	it, errGet := mc.Get(user)
+	if errGet != nil {
+		return "", fmt.Errorf("memcachedGet: %v", errGet)
+	}
+
+	ticket := string(it.Value)
+
+	log.Printf("memcachedGet: user=%s ticket=%s", user, ticket)
+
+	return ticket, nil
 }
 
 func memcachedPut(mc *memcache.Client, user, ticket string) {
-	log.Printf("memcachedPut: FIXME WRITEME")
+
+	errSet := mc.Set(&memcache.Item{Key: user, Value: []byte(ticket)})
+	if errSet != nil {
+		log.Printf("memcachedPut: %v", errSet)
+		return
+	}
+
+	log.Printf("memcachedPut: user=%s ticket=%s", user, ticket)
 }
 
 func (s *serverContext) cacheRead(user string) (string, error) {
