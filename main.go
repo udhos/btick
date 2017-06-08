@@ -92,13 +92,14 @@ func (s *serverContext) openCache() {
 
 	region := os.Getenv("AWS_REGION")
 	log.Printf("AWS_REGION=%s", region)
+	config := aws.NewConfig()
 	if region == "" {
 		region = "us-east-1"
 		log.Printf("missing AWS_REGION, setting region to: %s", region)
+		config = config.WithRegion(region)
 	}
-	config := aws.NewConfig().WithRegion(region)
+	log.Printf("dynamodb cache: region=%s", region)
 	s.svcDynamo = dynamodb.New(sess, config)
-	log.Printf("dynamodb cache: region=%s", *config.Region)
 }
 
 func (s *serverContext) getTicket(user string) (string, int, error) {
