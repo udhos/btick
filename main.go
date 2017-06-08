@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,26 +17,30 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	"github.com/aws/aws-sdk-go/service/elasticache"
 	_ "github.com/go-sql-driver/mysql"
 )
 
 const (
-	rootPath = "/"
-	userPath = "/user/"
+	rootPath       = "/"
+	userPath       = "/user/"
+	cacheDynamo    = 1
+	cacheMemcached = 2
 )
 
 type serverContext struct {
-	tickets    int64
-	dbreads    int32
-	computes   int32
-	dbmutex    sync.RWMutex
-	cachemutex sync.RWMutex
-	db         map[string]string
-	cache      map[string]string
-	mdb        *sql.DB // MySQL
-	svcDynamo  *dynamodb.DynamoDB
-	realDB     bool
-	realCache  bool
+	tickets      int64
+	dbreads      int32
+	computes     int32
+	dbmutex      sync.RWMutex
+	cachemutex   sync.RWMutex
+	db           map[string]string
+	cache        map[string]string
+	mdb          *sql.DB // MySQL
+	svcDynamo    *dynamodb.DynamoDB
+	svcMemcached *elasticache.ElastiCache
+	realDB       bool
+	realCache    int
 }
 
 func (s *serverContext) openDB() {
@@ -75,15 +80,25 @@ func (s *serverContext) openDB() {
 func (s *serverContext) openCache() {
 
 	cachereal := os.Getenv("CACHE_REAL")
-	s.realCache = cachereal != ""
-
-	if !s.realCache {
+	if cachereal == "" {
 		return
 	}
 
-	msg := fmt.Sprintf("CACHE_REAL='%s'", cachereal)
+	switch {
+	case strings.HasPrefix("dynamodb", cachereal):
+		s.realCache = cacheDynamo
+	case strings.HasPrefix("memcached", cachereal):
+		s.realCache = cacheMemcached
+	default:
+		var errAtoi error
+		s.realCache, errAtoi = strconv.Atoi(cachereal)
+		if errAtoi != nil {
+			log.Printf("bad CACHE_REAL='%s': %v", cachereal, errAtoi)
+			return
+		}
+	}
 
-	log.Print(msg)
+	log.Printf("CACHE_REAL='%s' => value=%d", cachereal, s.realCache)
 
 	sess, err := session.NewSession()
 	if err != nil {
@@ -98,8 +113,17 @@ func (s *serverContext) openCache() {
 		log.Printf("missing AWS_REGION, setting region to: %s", region)
 		config = config.WithRegion(region)
 	}
-	log.Printf("dynamodb cache: region=%s", region)
-	s.svcDynamo = dynamodb.New(sess, config)
+
+	log.Printf("open cache: region=%s", region)
+
+	switch s.realCache {
+	case cacheDynamo:
+		s.svcDynamo = dynamodb.New(sess, config)
+		log.Printf("open cache: dynamo")
+	case cacheMemcached:
+		s.svcMemcached = elasticache.New(sess, config)
+		log.Printf("open cache: memcached")
+	}
 }
 
 func (s *serverContext) getTicket(user string) (string, int, error) {
@@ -142,40 +166,77 @@ type dynamoItem struct {
 	Ticket string
 }
 
+func dynamoGet(svc *dynamodb.DynamoDB, user string) (string, error) {
+
+	input := &dynamodb.GetItemInput{
+		Key: map[string]*dynamodb.AttributeValue{
+			"User": {
+				S: aws.String(user),
+			},
+		},
+		TableName: aws.String("ticket_table"),
+	}
+
+	result, errGetItem := svc.GetItem(input)
+	if errGetItem != nil {
+		return "", fmt.Errorf("dynamoDB cacheread: %v", errGetItem)
+	}
+
+	if len(result.Item) < 1 {
+		return "", fmt.Errorf("dynamoDB cacheread: user=%s empty item: %d", user, len(result.Item))
+	}
+
+	var item dynamoItem
+	errUnmarshal := dynamodbattribute.UnmarshalMap(result.Item, &item)
+	if errUnmarshal != nil {
+		return "", fmt.Errorf("dynamoDB cacheread: unmarshal: %v", errUnmarshal)
+	}
+
+	log.Printf("dynamodb cacheread: user=%s ticket=%s", user, item.Ticket)
+
+	return item.Ticket, nil
+}
+
+func dynamoPut(svc *dynamodb.DynamoDB, user, ticket string) {
+
+	input := &dynamodb.PutItemInput{
+		Item: map[string]*dynamodb.AttributeValue{
+			"User": {
+				S: aws.String(user),
+			},
+			"Ticket": {
+				S: aws.String(ticket),
+			},
+		},
+		TableName: aws.String("ticket_table"),
+	}
+
+	_, errPut := svc.PutItem(input)
+	if errPut != nil {
+		log.Printf("dynamodb cachewrite: %v", errPut)
+		return
+	}
+
+	log.Printf("dynamodb cachewrite: user=%s ticket=%s", user, ticket)
+}
+
+func memcachedGet(svc *elasticache.ElastiCache, user string) (string, error) {
+	return "", fmt.Errorf("memcachedGet: FIXME WRITEME")
+}
+
+func memcachedPut(svc *elasticache.ElastiCache, user, ticket string) {
+	log.Printf("memcachedPut: FIXME WRITEME")
+}
+
 func (s *serverContext) cacheRead(user string) (string, error) {
 	defer s.cachemutex.RUnlock()
 	s.cachemutex.RLock()
 
-	if s.realCache {
-
-		input := &dynamodb.GetItemInput{
-			Key: map[string]*dynamodb.AttributeValue{
-				"User": {
-					S: aws.String(user),
-				},
-			},
-			TableName: aws.String("ticket_table"),
-		}
-
-		result, errGetItem := s.svcDynamo.GetItem(input)
-		if errGetItem != nil {
-			return "", fmt.Errorf("dynamoDB cacheread: %v", errGetItem)
-		}
-
-		if len(result.Item) < 1 {
-			return "", fmt.Errorf("dynamoDB cacheread: user=%s empty item: %d", user, len(result.Item))
-		}
-
-		var item dynamoItem
-		errUnmarshal := dynamodbattribute.UnmarshalMap(result.Item, &item)
-		if errUnmarshal != nil {
-			return "", fmt.Errorf("dynamoDB cacheread: unmarshal: %v", errUnmarshal)
-		}
-
-		log.Printf("dynamodb cacheread: user=%s ticket=%s", user, item.Ticket)
-
-		return item.Ticket, nil
-
+	switch s.realCache {
+	case cacheDynamo:
+		return dynamoGet(s.svcDynamo, user)
+	case cacheMemcached:
+		return memcachedGet(s.svcMemcached, user)
 	}
 
 	t, found := s.cache[user]
@@ -190,28 +251,12 @@ func (s *serverContext) cacheWrite(user, ticket string) {
 	defer s.cachemutex.Unlock()
 	s.cachemutex.Lock()
 
-	if s.realCache {
-
-		input := &dynamodb.PutItemInput{
-			Item: map[string]*dynamodb.AttributeValue{
-				"User": {
-					S: aws.String(user),
-				},
-				"Ticket": {
-					S: aws.String(ticket),
-				},
-			},
-			TableName: aws.String("ticket_table"),
-		}
-
-		_, errPut := s.svcDynamo.PutItem(input)
-		if errPut != nil {
-			log.Printf("dynamodb cachewrite: %v", errPut)
-			return
-		}
-
-		log.Printf("dynamodb cachewrite: user=%s ticket=%s", user, ticket)
-
+	switch s.realCache {
+	case cacheDynamo:
+		dynamoPut(s.svcDynamo, user, ticket)
+		return
+	case cacheMemcached:
+		memcachedPut(s.svcMemcached, user, ticket)
 		return
 	}
 
