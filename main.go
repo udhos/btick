@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	_ "github.com/go-sql-driver/mysql"
 	"io"
 	"log"
 	"net/http"
@@ -12,6 +11,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 const (
@@ -28,7 +33,7 @@ type serverContext struct {
 	db         map[string]string
 	cache      map[string]string
 	mdb        *sql.DB // MySQL
-	dynamo     int     // dynamoDB cache
+	svcDynamo  *dynamodb.DynamoDB
 	realDB     bool
 	realCache  bool
 }
@@ -76,28 +81,16 @@ func (s *serverContext) openCache() {
 		return
 	}
 
-	table := os.Getenv("CACHE_TABLE")
-
-	msg := fmt.Sprintf("CACHE_REAL='%s' CACHE_TABLE='%s'", cachereal, table)
-
-	if table == "" {
-		log.Fatalf("missing parameter: %s", msg)
-	}
+	msg := fmt.Sprintf("CACHE_REAL='%s'", cachereal)
 
 	log.Print(msg)
 
-	/*
-		dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s", user, pass, host, dbname)
+	sess, err := session.NewSession()
+	if err != nil {
+		log.Fatalf("aws session: %s", err)
+	}
 
-		mdb, errDB := sql.Open("mysql", dsn)
-		if errDB != nil {
-			mdb.Close()
-			log.Fatalf("sql open(%s): %v", dsn, errDB)
-		}
-
-		s.mdb = mdb
-	*/
-	s.dynamo = 1
+	s.svcDynamo = dynamodb.New(sess)
 }
 
 func (s *serverContext) getTicket(user string) (string, int, error) {
@@ -135,12 +128,39 @@ func (s *serverContext) getTicket(user string) (string, int, error) {
 	return "", http.StatusInternalServerError, fmt.Errorf("getTicket() failure: %v", errCompute)
 }
 
+type dynamoItem struct {
+	User   string
+	Ticket string
+}
+
 func (s *serverContext) cacheRead(user string) (string, error) {
 	defer s.cachemutex.RUnlock()
 	s.cachemutex.RLock()
 
 	if s.realCache {
-		return "", fmt.Errorf("dynamoDB cacheread: FIXME WRITEME")
+
+		input := &dynamodb.GetItemInput{
+			Key: map[string]*dynamodb.AttributeValue{
+				"User": {
+					S: aws.String(user),
+				},
+			},
+			TableName: aws.String("ticket_table"),
+		}
+
+		result, errGetItem := s.svcDynamo.GetItem(input)
+		if errGetItem != nil {
+			return "", fmt.Errorf("dynamoDB cacheread: %v", errGetItem)
+		}
+
+		var item dynamoItem
+		errUnmarshal := dynamodbattribute.UnmarshalMap(result.Item, &item)
+		if errUnmarshal != nil {
+			return "", fmt.Errorf("dynamoDB cacheread: unmarshal: %v", errUnmarshal)
+		}
+
+		return item.Ticket, nil
+
 	}
 
 	t, found := s.cache[user]

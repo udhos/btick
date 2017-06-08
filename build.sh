@@ -5,6 +5,7 @@
 echo GOPATH=$GOPATH
 
 go get github.com/go-sql-driver/mysql
+go get github.com/aws/aws-sdk-go
 
 pkg=github.com/udhos/btick
 
