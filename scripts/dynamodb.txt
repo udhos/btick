@@ -1,0 +1,5 @@
+
+Table: ticket_table
+Item primary key: User (srring)
+Item attribute: Ticket (string)
+
