@@ -162,6 +162,10 @@ func (s *serverContext) cacheRead(user string) (string, error) {
 			return "", fmt.Errorf("dynamoDB cacheread: %v", errGetItem)
 		}
 
+		if len(result.Item) < 1 {
+			return "", fmt.Errorf("dynamoDB cacheread: user=%s empty item: %d", user, len(result.Item))
+		}
+
 		var item dynamoItem
 		errUnmarshal := dynamodbattribute.UnmarshalMap(result.Item, &item)
 		if errUnmarshal != nil {
@@ -187,7 +191,27 @@ func (s *serverContext) cacheWrite(user, ticket string) {
 	s.cachemutex.Lock()
 
 	if s.realCache {
-		log.Printf("dynamoDB cachewrite: FIXME WRITEME")
+
+		input := &dynamodb.PutItemInput{
+			Item: map[string]*dynamodb.AttributeValue{
+				"User": {
+					S: aws.String(user),
+				},
+				"Ticket": {
+					S: aws.String(ticket),
+				},
+			},
+			TableName: aws.String("ticket_table"),
+		}
+
+		_, errPut := s.svcDynamo.PutItem(input)
+		if errPut != nil {
+			log.Printf("dynamodb cachewrite: %v", errPut)
+			return
+		}
+
+		log.Printf("dynamodb cachewrite: user=%s ticket=%s", user, ticket)
+
 		return
 	}
 
