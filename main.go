@@ -17,7 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
-	"github.com/aws/aws-sdk-go/service/elasticache"
+	"github.com/bradfitz/gomemcache/memcache"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -29,18 +29,18 @@ const (
 )
 
 type serverContext struct {
-	tickets      int64
-	dbreads      int32
-	computes     int32
-	dbmutex      sync.RWMutex
-	cachemutex   sync.RWMutex
-	db           map[string]string
-	cache        map[string]string
-	mdb          *sql.DB // MySQL
-	svcDynamo    *dynamodb.DynamoDB
-	svcMemcached *elasticache.ElastiCache
-	realDB       bool
-	realCache    int
+	tickets    int64
+	dbreads    int32
+	computes   int32
+	dbmutex    sync.RWMutex
+	cachemutex sync.RWMutex
+	db         map[string]string
+	cache      map[string]string
+	mdb        *sql.DB // MySQL
+	svcDynamo  *dynamodb.DynamoDB
+	memcache   *memcache.Client
+	realDB     bool
+	realCache  int
 }
 
 func (s *serverContext) openDB() {
@@ -121,7 +121,12 @@ func (s *serverContext) openCache() {
 		s.svcDynamo = dynamodb.New(sess, config)
 		log.Printf("open cache: dynamo")
 	case cacheMemcached:
-		s.svcMemcached = elasticache.New(sess, config)
+		hosts := os.Getenv("CACHE_MEMCACHED_HOSTS")
+		memcachedHosts := strings.Split(hosts, ",")
+		if len(memcachedHosts) < 1 {
+			log.Fatalf("bad CACHE_MEMCACHED_HOSTS='%s'", hosts)
+		}
+		s.memcache = memcache.New(memcachedHosts...)
 		log.Printf("open cache: memcached")
 	}
 }
@@ -220,11 +225,11 @@ func dynamoPut(svc *dynamodb.DynamoDB, user, ticket string) {
 	log.Printf("dynamodb cachewrite: user=%s ticket=%s", user, ticket)
 }
 
-func memcachedGet(svc *elasticache.ElastiCache, user string) (string, error) {
+func memcachedGet(mc *memcache.Client, user string) (string, error) {
 	return "", fmt.Errorf("memcachedGet: FIXME WRITEME")
 }
 
-func memcachedPut(svc *elasticache.ElastiCache, user, ticket string) {
+func memcachedPut(mc *memcache.Client, user, ticket string) {
 	log.Printf("memcachedPut: FIXME WRITEME")
 }
 
@@ -236,7 +241,7 @@ func (s *serverContext) cacheRead(user string) (string, error) {
 	case cacheDynamo:
 		return dynamoGet(s.svcDynamo, user)
 	case cacheMemcached:
-		return memcachedGet(s.svcMemcached, user)
+		return memcachedGet(s.memcache, user)
 	}
 
 	t, found := s.cache[user]
@@ -256,7 +261,7 @@ func (s *serverContext) cacheWrite(user, ticket string) {
 		dynamoPut(s.svcDynamo, user, ticket)
 		return
 	case cacheMemcached:
-		memcachedPut(s.svcMemcached, user, ticket)
+		memcachedPut(s.memcache, user, ticket)
 		return
 	}
 
