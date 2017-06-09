@@ -164,6 +164,7 @@ func (s *serverContext) getTicket(user string) (string, int, error) {
 	// try compute
 	t3, errCompute := s.compute(user)
 	if errCompute == nil {
+		s.cacheWrite(user, t3)
 		s.dbWrite(user, t3)
 		return t3, http.StatusOK, nil
 	}
