@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 )
 
 const (
+	version        = "0.0"
 	rootPath       = "/"
 	userPath       = "/user/"
 	cacheDynamo    = 1
@@ -380,6 +382,9 @@ func (s *serverContext) compute(user string) (string, error) {
 }
 
 func main() {
+
+	log.Printf("version: %s", version)
+	log.Printf("runtime: %s", runtime.Version())
 
 	s := &serverContext{
 		db:    map[string]string{},
